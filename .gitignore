@@ -1,0 +1,27 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+
+# Packaging / builds
+build/
+dist/
+*.egg-info/
+
+# Local data / outputs
+asp_python_app/extracted/
+asp_python_app/model_training/All_FV_Loops/
+asp_python_app/model_training/dataset/
+asp_python_app/model_training/models/
+asp_python_app/model_predicting/model/
+asp_python_app/model_predicting/test_images/
+asp_python_app/inputs/
+asp_python_app/extraction/inputs/
+asp_python_app.zip
+
+# Logs / temp
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

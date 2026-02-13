@@ -1,0 +1,10 @@
+# Minimal offline/runtime requirements for v1.00 extractors
+pymupdf>=1.23
+opencv-python>=4.7
+numpy>=1.23
+pandas>=1.5
+pyyaml>=6.0
+
+# Optional (only for OCR fallback):
+pytesseract>=0.3.10
+

@@ -1,0 +1,20 @@
+{
+  "status": "done",
+  "extracted": {
+    "text": "IMPRESSION: Stable. No acute cardiopulmonary disease.\\nBP 120/75, HR 68 bpm.",
+    "numbers": {
+      "bp_sys": 120,
+      "bp_dia": 75,
+      "hr": 68
+    },
+    "images": [
+      "assets/temasek_logo.png",
+      "assets/changi_general_hospital_logo.png"
+    ]
+  },
+  "conclusions": {
+    "algorithm": "Vitals within normal range. Recommend routine follow-up.",
+    "ai_classification": "Chest X-ray classified as 'No acute findings' (confidence 0.93)."
+  },
+  "report_url": "#"
+}

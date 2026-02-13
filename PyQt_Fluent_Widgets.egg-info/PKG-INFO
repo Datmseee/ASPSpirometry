@@ -1,0 +1,111 @@
+Metadata-Version: 2.4
+Name: PyQt-Fluent-Widgets
+Version: 1.10.2
+Summary: A fluent design widgets library based on PyQt5
+Home-page: https://qfluentwidgets.com
+Author: zhiyiYo
+Author-email: shokokawaii@outlook.com
+License: GPLv3
+Project-URL: Documentation, https://qfluentwidgets.com/
+Project-URL: Source Code, https://github.com/zhiyiYo/PyQt-Fluent-Widgets
+Project-URL: Bug Tracker, https://github.com/zhiyiYo/PyQt-Fluent-Widgets/issues
+Keywords: pyqt fluent widgets
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)
+Classifier: Operating System :: OS Independent
+Description-Content-Type: text/markdown
+Requires-Dist: PyQt5>=5.15.0
+Requires-Dist: PyQt5-Frameless-Window>=0.4.0
+Requires-Dist: darkdetect
+Provides-Extra: full
+Requires-Dist: scipy; extra == "full"
+Requires-Dist: pillow; extra == "full"
+Requires-Dist: colorthief; extra == "full"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: summary
+
+# Clinical Report Processing Portal (Frontend Only)
+
+**Stack**: HTML, CSS, Vanilla JS
+
+This is a clean, responsive UI for a hackathon prototype where **physicians upload reports** and a **Python backend** performs:
+- OCR (e.g., Tesseract) to extract **text / numbers / images**
+- Numerical algorithm/ML to produce an **algorithmic conclusion**
+- Image classification model to produce an **AI classification conclusion**
+- Returns both conclusions and artifacts to show on the results screen.
+
+> ✅ Your teammate will provide the Python backend. This repo is **frontend only** with clear API contracts your backend can follow.
+
+---
+
+## Quick start (no backend)
+Open `index.html` directly in your browser and click **“Try Demo (no backend)”** to see the UI flow using `mock/sample_response.json`.
+
+> If loading `mock/sample_response.json` is blocked by CORS when running from file://, use a tiny static server (e.g. `python -m http.server 5500`) and visit `http://localhost:5500/`.
+
+## Wire up your Python backend
+By default, the app sends requests to the **same origin**. If your backend runs on another port (e.g., `http://localhost:8000`), edit the first line in `app.js`:
+
+```js
+const API_BASE = "http://localhost:8000"; // your FastAPI/Flask base
+```
+
+### Expected endpoints (contract)
+```
+POST /api/reports
+  multipart/form-data: patient_name, patient_id, file
+  -> { "job_id": "abc123" }
+
+GET /api/reports/:job_id
+  -> {"status":"processing","progress":0-100}
+  -> when done:
+     {
+       "status": "done",
+       "extracted": {
+         "text": "...",
+         "numbers": { "bp_sys": 120, "bp_dia": 75, "hr": 68 },
+         "images": ["/api/files/img1.png", "/api/files/img2.png"]
+       },
+       "conclusions": {
+         "algorithm": "…",
+         "ai_classification": "…"
+       },
+       "report_url": "/api/files/report.pdf"
+     }
+
+GET /api/files/:name
+  -> serves extracted images/report
+```
+
+### Suggested Python stack
+- **FastAPI** for endpoints and automatic OpenAPI docs
+- **Tesseract OCR** via `pytesseract` for text
+- **pandas / numpy / scikit-learn** or your custom model for number-based summary
+- **PyTorch / TensorFlow** for image classification
+- Store temporary files in a `jobs/{job_id}/…` folder; stream images via `StaticFiles`
+
+## UI features
+- Drag-and-drop uploader with progress
+- Status polling
+- Two conclusion panels: *Algorithmic* and *AI Classification*
+- Pretty rendering of extracted text, numbers (key/value), and a gallery of extracted images
+- "Open Processed Report" button
+- Fully responsive, clean design using pure CSS
+
+## Assets
+School and hospital logos are placed under `assets/` and shown in the header.
+
+---
+
+### License
+For hackathon/educational use.

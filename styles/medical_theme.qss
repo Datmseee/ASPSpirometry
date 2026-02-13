@@ -1,0 +1,84 @@
+/* Main background */
+QWidget {
+    background-color: #F6FAFF; /* very light blue */
+    font-family: "Segoe UI", "Arial", sans-serif;
+    color: #1A1A1A;
+}
+
+/* Cards */
+QFrame {
+    background-color: #FFFFFF;
+    border-radius: 16px;
+    border: 1px solid #D0E6F7;
+    box-shadow: 0 2px 12px rgba(0,159,227,0.08);
+    padding: 18px;
+}
+
+/* Buttons */
+QPushButton, #primaryUploadButton {
+    background-color: #009FE3;
+    color: white;
+    border-radius: 10px;
+    padding: 10px 22px;
+    font-weight: 600;
+    font-size: 15px;
+    box-shadow: 0 1px 4px rgba(0,159,227,0.10);
+    border: none;
+    transition: background 0.2s;
+}
+
+QPushButton:hover, #primaryUploadButton:hover {
+    background-color: #007BB5;
+}
+
+QPushButton:pressed, #primaryUploadButton:pressed {
+    background-color: #005F8C;
+}
+
+/* Sidebar */
+#navigationInterface {
+    background-color: #E6F2FF;
+    border-right: 1px solid #D0E6F7;
+}
+
+/* Sidebar selected item */
+#navigationInterface::item:selected {
+    background-color: #009FE3;
+    color: white;
+    border-left: 4px solid #004E7C;
+    font-weight: bold;
+}
+
+/* Highlight abnormalities */
+.highlight-bad {
+    color: #D60000;
+    font-weight: bold;
+}
+
+.highlight-good {
+    color: #009900;
+    font-weight: bold;
+}
+
+/* Drag & Drop Area */
+#uploadDropArea {
+    border: 2px dashed #009FE3;
+    border-radius: 18px;
+    background-color: #F3F9FF;
+    min-height: 180px;
+    box-shadow: 0 1px 8px rgba(0,159,227,0.06);
+    transition: border-color 0.2s, background 0.2s;
+}
+
+#uploadDropArea:hover {
+    border-style: solid;
+    border-color: #007BB5;
+    background-color: #E6F2FF;
+}
+
+/* File name label */
+#fileNameLabel {
+    color: #333333;
+    font-size: 14px;
+    padding-left: 8px;
+}
