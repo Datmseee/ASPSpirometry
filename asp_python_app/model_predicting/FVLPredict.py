@@ -1,6 +1,5 @@
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models
-from torchvision.models import ResNet18_Weights
 import torch.nn as nn
 import torch
 from pathlib import Path
@@ -11,6 +10,7 @@ import numpy as np
 import glob
 
 parent_directory = Path(__file__).resolve().parent
+DEFAULT_MODEL_PATH = parent_directory / "model" / "FVL_classifier_99_0.04.pth.tar"
 
 class FVLPredictDataset(Dataset):
     '''
@@ -31,11 +31,12 @@ class FVLPredictDataset(Dataset):
             image = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])(image)
             self.images.append(image)
             self.image_names.append(Path(fvl_img_file).name.removesuffix(image_suffix))
-        self.images = np.array(self.images)
-        self.normalize()
-
-    def normalize(self):
-        self.images = self.images/255.0
+        if self.images:
+            self.images = torch.stack(self.images, dim=0)
+            # Keep preprocessing consistent with the original training pipeline.
+            self.images = self.images / 255.0
+        else:
+            self.images = torch.empty((0, 3, image_size[1], image_size[0]), dtype=torch.float32)
 
     def __len__(self):
         return self.images.shape[0]
@@ -44,13 +45,13 @@ class FVLPredictDataset(Dataset):
         return {"images": self.images[index], "names": self.image_names[index]}
     
     def __add__(self, other):
-        self.images = np.concatenate((self.images, other.images), axis=0)
+        self.images = torch.cat((self.images, other.images), dim=0)
         return self
 
 class MLC(nn.Module):
     def __init__(self, num_classes):
         super(MLC, self).__init__()
-        self.resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        self.resnet = models.resnet18(weights=None)
         self.in_features = self.resnet.fc.in_features
         self.resnet.fc = nn.Linear(self.in_features, num_classes)
 
@@ -83,14 +84,50 @@ def predict_with_model(model, data_loader, device):
     # print(file_names)
     return predictions_labels, predictions_probs, file_names
 
-def predict_from_directory(dir_path, model_path=parent_directory/"model/FVL_classifier_97.pth.tar"):
+def _resolve_model_path(model_path=None):
+    if model_path is not None:
+        return Path(model_path)
+
+    if DEFAULT_MODEL_PATH.is_file():
+        return DEFAULT_MODEL_PATH
+
+    raise FileNotFoundError(f"Model checkpoint not found: {DEFAULT_MODEL_PATH}")
+
+
+def _extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        raise TypeError("Checkpoint is not a dictionary.")
+
+    for key in ("state_dict", "model_state_dict", "model"):
+        value = checkpoint.get(key)
+        if isinstance(value, dict):
+            return value
+
+    if checkpoint and all(isinstance(key, str) for key in checkpoint.keys()):
+        return checkpoint
+
+    raise KeyError("Checkpoint does not contain a supported state dict.")
+
+
+def _normalize_state_dict(state_dict):
+    if any(key.startswith("module.") for key in state_dict):
+        return {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+    return state_dict
+
+
+def predict_from_directory(dir_path, model_path=None):
     dataset = FVLPredictDataset(image_path=dir_path)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
     model = MLC(num_classes=2)
     model = model.to(device)
-    params = torch.load(model_path)
-    model.load_state_dict(params['state_dict'])
+    model_path = _resolve_model_path(model_path)
+    params = torch.load(model_path, map_location=device)
+    state_dict = _normalize_state_dict(_extract_state_dict(params))
+    model.load_state_dict(state_dict)
     return predict_with_model(model, dataloader, device)
 
 if __name__ == "__main__":

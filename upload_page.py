@@ -263,14 +263,7 @@ class PredictionWorker(QThread):
         if not graphs_dir.exists():
             raise RuntimeError("Graph extraction did not produce output.")
 
-        if str(self.asp_root) not in sys.path:
-            sys.path.insert(0, str(self.asp_root))
-        try:
-            from model_predicting import FVLPredict
-        except Exception as exc:
-            raise RuntimeError(f"Model import failed: {exc}") from exc
-
-        labels, confidence, _ = FVLPredict.predict_from_directory(graphs_dir)
+        labels, confidence = self._run_model_prediction(graphs_dir)
         if labels is None or len(labels) == 0:
             raise RuntimeError("No predictions generated.")
 
@@ -298,6 +291,77 @@ class PredictionWorker(QThread):
             table_rows=table_rows,
             table_error=table_error,
         )
+
+    def _run_model_prediction(self, graphs_dir: Path):
+        # Prefer in-process prediction, but recover from known Qt/torch DLL init issues on Windows.
+        if str(self.asp_root) not in sys.path:
+            sys.path.insert(0, str(self.asp_root))
+
+        try:
+            from model_predicting import FVLPredict
+            labels, confidence, _ = FVLPredict.predict_from_directory(graphs_dir)
+            return labels, confidence
+        except Exception as exc:
+            message = str(exc)
+            lower = message.lower()
+            is_dll_init_error = "winerror 1114" in lower or "c10.dll" in lower
+            if not is_dll_init_error:
+                raise RuntimeError(f"Model import failed: {exc}") from exc
+
+            self.status.emit(str(graphs_dir), "Model prediction (fallback)")
+            return self._run_model_prediction_subprocess(graphs_dir, message)
+
+    def _run_model_prediction_subprocess(self, graphs_dir: Path, original_error: str):
+        helper_code = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "asp_root = Path(sys.argv[1])\n"
+            "graphs_dir = Path(sys.argv[2])\n"
+            "if str(asp_root) not in sys.path:\n"
+            "    sys.path.insert(0, str(asp_root))\n"
+            "import torch\n"
+            "from model_predicting import FVLPredict\n"
+            "labels, confidence, _ = FVLPredict.predict_from_directory(graphs_dir)\n"
+            "if hasattr(labels, 'tolist'):\n"
+            "    labels = labels.tolist()\n"
+            "if hasattr(confidence, 'tolist'):\n"
+            "    confidence = confidence.tolist()\n"
+            "print('__FVL_PRED_JSON__=' + json.dumps({'labels': labels, 'confidence': confidence}))\n"
+        )
+        cmd = [sys.executable, "-c", helper_code, str(self.asp_root), str(graphs_dir)]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Model import failed: {original_error}\nSubprocess fallback timed out."
+            ) from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Unknown subprocess error.").strip()
+            if len(detail) > 1000:
+                detail = detail[-1000:]
+            raise RuntimeError(
+                f"Model import failed: {original_error}\nSubprocess fallback failed: {detail}"
+            )
+
+        marker = "__FVL_PRED_JSON__="
+        payload = None
+        for line in reversed((result.stdout or "").splitlines()):
+            if line.startswith(marker):
+                payload = line[len(marker):]
+                break
+
+        if not payload:
+            raise RuntimeError(
+                "Model import failed: subprocess fallback did not return prediction payload."
+            )
+
+        try:
+            parsed = json.loads(payload)
+            return parsed.get("labels"), parsed.get("confidence")
+        except Exception as exc:
+            raise RuntimeError(f"Model import failed: could not parse fallback output: {exc}") from exc
 
     def _sanitize_case_id(self, stem: str) -> str:
         return re.sub(r"\s+", "_", (stem or "").strip())
@@ -357,6 +421,7 @@ class PredictionWorker(QThread):
 
     def _write_prediction_pdf(self, *args, **kwargs):
         raise RuntimeError("PDF generation must run on the UI thread.")
+
 
 class UploadPage(QWidget):
     """
@@ -898,14 +963,68 @@ class UploadPage(QWidget):
         def section_height(line_count, title_height=18, line_height=14, padding=12):
             return title_height + (line_count * line_height) + padding
 
+        def _text_width(text, fontsize=11):
+            try:
+                return fitz.get_text_length(text, fontname="helv", fontsize=fontsize)
+            except Exception:
+                # Fallback estimate if text metrics are unavailable.
+                return len(text) * fontsize * 0.55
+
+        def wrap_line(line, max_width, fontsize=11):
+            text = (line or "").strip()
+            if not text:
+                return [""]
+
+            if _text_width(text, fontsize=fontsize) <= max_width:
+                return [text]
+
+            words = text.split()
+            if not words:
+                return [text]
+
+            wrapped = []
+            current = words[0]
+            for word in words[1:]:
+                candidate = f"{current} {word}"
+                if _text_width(candidate, fontsize=fontsize) <= max_width:
+                    current = candidate
+                else:
+                    wrapped.append(current)
+                    current = word
+            wrapped.append(current)
+
+            # Hard-wrap any single oversized token.
+            final_lines = []
+            for chunk in wrapped:
+                if _text_width(chunk, fontsize=fontsize) <= max_width:
+                    final_lines.append(chunk)
+                    continue
+                piece = ""
+                for ch in chunk:
+                    candidate = piece + ch
+                    if piece and _text_width(candidate, fontsize=fontsize) > max_width:
+                        final_lines.append(piece)
+                        piece = ch
+                    else:
+                        piece = candidate
+                if piece:
+                    final_lines.append(piece)
+            return final_lines
+
         def draw_section(y_start, title, body_lines):
-            height = section_height(len(body_lines))
+            text_x = margin + 10
+            max_text_width = 555 - text_x - 10
+            wrapped_lines = []
+            for line in body_lines:
+                wrapped_lines.extend(wrap_line(line, max_text_width, fontsize=11))
+
+            height = section_height(len(wrapped_lines))
             rect = fitz.Rect(margin, y_start, 555, y_start + height)
             page.draw_rect(rect, color=(0.82, 0.90, 0.97), width=1)
             page.insert_text((margin + 8, y_start + 16), title, fontsize=12, fontname="helv")
             y_text = y_start + 30
-            for line in body_lines:
-                page.insert_text((margin + 10, y_text), line, fontsize=11, fontname="helv")
+            for line in wrapped_lines:
+                page.insert_text((text_x, y_text), line, fontsize=11, fontname="helv")
                 y_text += 14
             return y_start + height + 14
 

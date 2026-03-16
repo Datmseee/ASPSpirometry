@@ -71,7 +71,9 @@ def import_deps() -> Tuple[Any, Any, Any]:
         import cv2
         import numpy as np
     except Exception as exc:
-        raise SystemExit("Missing deps. Install: pymupdf opencv-python numpy") from exc
+        raise SystemExit(
+            f"Dependency import failed: {exc}. Install/repair: pymupdf opencv-python numpy"
+        ) from exc
     return fitz, cv2, np
 
 

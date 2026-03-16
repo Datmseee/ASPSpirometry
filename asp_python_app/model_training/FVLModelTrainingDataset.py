@@ -49,8 +49,8 @@ class FVLModelTrainingDataset(Dataset):
     
     def train_val_test_split(self):
         # 0.1 0.1 0.8 split
-        self.x_train, self.x_test, self.y_train, self.y_test = train_test_split(self.images, self.labels, test_size=0.1)
-        self.x_train, self.x_val, self.y_train, self.y_val = train_test_split(self.images, self.labels, test_size=0.11)
+        self.x_train, self.x_test, self.y_train, self.y_test = train_test_split(self.images, self.labels, test_size=0.1, random_state=42)
+        self.x_train, self.x_val, self.y_train, self.y_val = train_test_split(self.x_train, self.y_train, test_size=0.11, random_state=42)
 
     def __len__(self):
         match self.mode:

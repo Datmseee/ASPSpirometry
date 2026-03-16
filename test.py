@@ -1,3 +1,9 @@
+try:
+    # On Windows, importing torch after Qt can fail with WinError 1114.
+    import torch  # noqa: F401
+except Exception as exc:
+    print(f"Warning: torch preload failed at startup: {exc}")
+
 from qfluentwidgets import (
     FluentWindow, NavigationItemPosition,
     setTheme, Theme, FluentIcon
