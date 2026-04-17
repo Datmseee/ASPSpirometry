@@ -1956,9 +1956,11 @@ def validate_records(records: Dict[str, Dict[str, str]]) -> Tuple[str, List[str]
         else:
             try:
                 v = float(pre_best)
-                if row == "FEV1/FVC" and not (0.20 <= v <= 1.05):
-                    issues.append(f"WARN {row} PRE-BEST={v:.2f} outside [0.20, 1.05]")
-                elif row != "FEV1/FVC" and not (_BEST_LITRE_RANGE[0] <= v <= _BEST_LITRE_RANGE[1]):
+                if row == "FEV1/FVC":
+                    # Accept decimal ratio (0.20-1.05) or percentage (20-105).
+                    if not ((0.20 <= v <= 1.05) or (20.0 <= v <= 105.0)):
+                        issues.append(f"WARN {row} PRE-BEST={v:.2f} outside [0.20-1.05] or [20-105]")
+                elif not (_BEST_LITRE_RANGE[0] <= v <= _BEST_LITRE_RANGE[1]):
                     issues.append(f"WARN {row} PRE-BEST={v:.2f} outside {_BEST_LITRE_RANGE}")
             except ValueError:
                 issues.append(f"FAIL {row} PRE-BEST='{pre_best}' not numeric")
