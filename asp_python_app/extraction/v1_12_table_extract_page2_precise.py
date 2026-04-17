@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -145,6 +146,8 @@ class QcResult:
     engine_used: str
     rows_found: int
     warnings: List[str]
+    validation_status: str = "unknown"
+    validation_issues: List[str] = field(default_factory=list)
 
 
 def parse_args() -> argparse.Namespace:
@@ -195,6 +198,7 @@ def parse_args() -> argparse.Namespace:
         help='Optional comma-separated list of PDF names or stems to process (e.g. "DEID_Case 15.pdf,DEID_Case 18").',
     )
     parser.add_argument("--limit", type=int, default=0, help="Optional max PDFs to process (0 = all).")
+    parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker processes (default: 1).")
     return parser.parse_args()
 
 
@@ -209,6 +213,43 @@ def import_deps() -> Tuple[Any, Any, Any, Any]:
             f"Dependency import failed: {exc}. Install/repair: pymupdf opencv-python numpy pandas"
         ) from exc
     return fitz, cv2, np, pd
+
+
+def find_table_top_from_page(cv2: Any, np: Any, page_img: Any) -> Optional[Tuple[float, float]]:
+    """
+    Dynamically locate the spirometry data table by finding the topmost wide
+    colored band (the column-header row) in the lower portion of the page.
+
+    Fixes cases where the table shifts up/down between PDFs — the fixed
+    rel_top/rel_bottom defaults can miss the table entirely when this happens.
+
+    Returns (rel_top, rel_bottom) ready for crop_band, or None if not found
+    (caller should fall back to the default fixed coordinates).
+    """
+    h, w = page_img.shape[:2]
+    # Skip the top 18%: graphs and the report header live there.
+    search_from = int(h * 0.18)
+    roi = page_img[search_from:, :]
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    _, s, v = cv2.split(hsv)
+    # Colored pixels: meaningful saturation and not too dark or washed-out.
+    colored = cv2.bitwise_and(cv2.inRange(s, 45, 255), cv2.inRange(v, 45, 225))
+
+    # A genuine header row spans at least 45% of the page width.
+    min_run_width = int(w * 0.45)
+    row_sums = np.sum(colored > 0, axis=1)
+    colored_rows = np.where(row_sums >= min_run_width)[0]
+    if len(colored_rows) == 0:
+        return None
+
+    first_colored = int(colored_rows[0]) + search_from
+    margin_above = max(4, int(h * 0.008))
+    estimated_table_h = int(h * 0.225)  # ~22% of page height covers all 13 rows
+
+    rel_top = max(0.0, (first_colored - margin_above) / float(h))
+    rel_bottom = min(1.0, (first_colored + estimated_table_h) / float(h))
+    return rel_top, rel_bottom
 
 
 def _preprocess_for_ocr(img_bgr: Any, *, scale: float = 3.0, border: int = 10) -> Tuple[Any, float, int]:
@@ -1069,9 +1110,34 @@ def ocr_cell_candidates(
         bin_img[:, -m:] = 255
         return bin_img
 
+    def _erase_horizontal_fills(bin_img: Any) -> Any:
+        # Erase thick horizontal bands (printing gaps / artifacts) that cover
+        # ≥10% of the cell height. These obscure parts of digits and the minus
+        # sign, and can't be recovered by grid-line removal alone.
+        cell_h = bin_img.shape[0]
+        if cell_h < 6:
+            return bin_img
+        row_means = np.mean(bin_img, axis=1)
+        dark = (row_means < 80).astype(np.uint8)
+        if dark.sum() == 0:
+            return bin_img
+        result = bin_img.copy()
+        min_band_h = max(2, int(0.10 * cell_h))
+        run_start = None
+        for i, d in enumerate(dark):
+            if d and run_start is None:
+                run_start = i
+            elif not d and run_start is not None:
+                if (i - run_start) >= min_band_h:
+                    result[run_start:i, :] = 255
+                run_start = None
+        if run_start is not None and (cell_h - run_start) >= min_band_h:
+            result[run_start:cell_h, :] = 255
+        return result
+
     # Otsu binarization (base).
     _, bw = cv2.threshold(gray0, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = _clear_border(_remove_grid_lines(bw))
+    bw = _erase_horizontal_fills(_clear_border(_remove_grid_lines(bw)))
     variants.append(bw)
     if level == "full":
         variants.append(255 - bw)
@@ -1080,7 +1146,7 @@ def ocr_cell_candidates(
     ad = cv2.adaptiveThreshold(
         gray0, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 6
     )
-    ad = _clear_border(_remove_grid_lines(ad))
+    ad = _erase_horizontal_fills(_clear_border(_remove_grid_lines(ad)))
     variants.append(ad)
     if level == "full":
         variants.append(255 - ad)
@@ -1855,6 +1921,79 @@ def save_debug_overlay(
     cv2.imwrite(str(out_path), combined, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
 
 
+_ZSCORE_RANGE = (-5.5, 5.5)
+_PCT_PRED_RANGE = (15.0, 220.0)
+_BEST_LITRE_RANGE = (0.1, 20.0)
+
+
+def validate_records(records: Dict[str, Dict[str, str]]) -> Tuple[str, List[str]]:
+    """
+    Validate extracted records against clinical plausibility ranges.
+
+    Checks:
+    - Key rows (FVC, FEV1, FEV1/FVC) have a PRE-BEST value
+    - PRE-BEST values are in a plausible range
+    - Z-scores are within [-5.5, 5.5]
+    - %Pred values are within [15, 220]
+
+    Returns (status, issues):
+      'pass'  — no issues detected
+      'warn'  — suspicious values but nothing missing
+      'fail'  — key values missing or clearly non-numeric
+    """
+    issues: List[str] = []
+
+    rows_with_data = sum(
+        1 for rn in ROW_NAMES if any(records.get(rn, {}).get(c, "").strip() for c in OUT_COLUMNS)
+    )
+    if rows_with_data < 8:
+        issues.append(f"FAIL rows_found={rows_with_data}/13 (expected >=8)")
+
+    for row in ["FVC", "FEV1", "FEV1/FVC"]:
+        pre_best = records.get(row, {}).get("PRE-BEST", "").strip()
+        if not pre_best:
+            issues.append(f"FAIL {row} PRE-BEST blank")
+        else:
+            try:
+                v = float(pre_best)
+                if row == "FEV1/FVC" and not (0.20 <= v <= 1.05):
+                    issues.append(f"WARN {row} PRE-BEST={v:.2f} outside [0.20, 1.05]")
+                elif row != "FEV1/FVC" and not (_BEST_LITRE_RANGE[0] <= v <= _BEST_LITRE_RANGE[1]):
+                    issues.append(f"WARN {row} PRE-BEST={v:.2f} outside {_BEST_LITRE_RANGE}")
+            except ValueError:
+                issues.append(f"FAIL {row} PRE-BEST='{pre_best}' not numeric")
+
+        for col in ("Pre_Z-Score", "Post_Z-Score"):
+            val = records.get(row, {}).get(col, "").strip()
+            if not val:
+                continue
+            try:
+                v = float(val)
+                if not (_ZSCORE_RANGE[0] <= v <= _ZSCORE_RANGE[1]):
+                    issues.append(f"WARN {row} {col}={v:.2f} outside {_ZSCORE_RANGE}")
+            except ValueError:
+                issues.append(f"WARN {row} {col}='{val}' not numeric")
+
+        for col in ("Pre_%Pred", "Post_%Pred"):
+            val = records.get(row, {}).get(col, "").strip()
+            if not val:
+                continue
+            try:
+                v = float(val)
+                if not (_PCT_PRED_RANGE[0] <= v <= _PCT_PRED_RANGE[1]):
+                    issues.append(f"WARN {row} {col}={v:.1f} outside {_PCT_PRED_RANGE}")
+            except ValueError:
+                pass
+
+    fails = [i for i in issues if i.startswith("FAIL")]
+    warns = [i for i in issues if i.startswith("WARN")]
+    if fails:
+        return "fail", issues
+    if warns:
+        return "warn", issues
+    return "pass", issues
+
+
 def main() -> int:
     args = parse_args()
     fitz, cv2, np, pd = import_deps()
@@ -1894,6 +2033,10 @@ def main() -> int:
     if args.engine in {"ocr", "auto"} and args.engine != "text" and not tesseract_cmd:
         print("[WARN] Tesseract not found; OCR fallback disabled. (Set --tesseract-cmd or TESSERACT_CMD)")
 
+    workers = max(1, min(args.workers, multiprocessing.cpu_count()))
+    if workers > 1:
+        print(f"[INFO] Parallel mode: {workers} workers across {len(pdfs)} PDFs.")
+
     combined_rows: List[Dict[str, str]] = []
     processed = 0
 
@@ -1909,6 +2052,12 @@ def main() -> int:
 
         try:
             page_img = render_page_image(fitz, cv2, np, pdf_path, args.page_index, args.dpi)
+            # Dynamically locate the table header row so that vertical/horizontal
+            # shifts between PDFs don't cause the fixed band to miss the table.
+            dyn = find_table_top_from_page(cv2, np, page_img)
+            if dyn is not None:
+                dyn_top, dyn_bottom = dyn
+                rel_rect = (rel_rect[0], dyn_top, rel_rect[2], dyn_bottom)
             band_img, band_bbox = crop_band(page_img, rel_rect=rel_rect, extra_bottom=extra_bottom)
             table_img, table_bbox_in_band, _ = tighten_table_crop(cv2, np, band_img)
         except Exception as exc:
@@ -2055,9 +2204,18 @@ def main() -> int:
         enforce_zscore_sign(records, warnings)
         enforce_zscore_bounds(records, warnings, strict=args.strict)
 
-        # Basic QC score.
+        # Basic QC score + clinical validation.
         rows_found = sum(1 for rn in ROW_NAMES if any(records[rn][c].strip() for c in OUT_COLUMNS))
-        qc = QcResult(pdf_name=pdf_path.name, case_id=case_id, engine_used=engine_used, rows_found=rows_found, warnings=warnings)
+        val_status, val_issues = validate_records(records)
+        qc = QcResult(
+            pdf_name=pdf_path.name,
+            case_id=case_id,
+            engine_used=engine_used,
+            rows_found=rows_found,
+            warnings=warnings,
+            validation_status=val_status,
+            validation_issues=val_issues,
+        )
 
         # Persist per-case CSV.
         per_rows = records_to_rows(case_id, records)
@@ -2089,7 +2247,9 @@ def main() -> int:
         qc_path.write_text(json.dumps(asdict(qc), indent=2), encoding="utf-8")
 
         processed += 1
-        print(f"[OK] {pdf_path.name} -> {per_csv.name} (engine={engine_used}, rows_found={rows_found})")
+        val_tag = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}.get(val_status, "?")
+        issue_str = f" | {val_issues[0]}" if val_issues else ""
+        print(f"[OK] {pdf_path.name} -> {per_csv.name} (engine={engine_used}, rows={rows_found}, val={val_tag}{issue_str})")
 
     if combined_rows:
         combo = pd.DataFrame(combined_rows, columns=["case_id", "metric"] + OUT_COLUMNS)
