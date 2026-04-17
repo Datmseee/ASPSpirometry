@@ -211,6 +211,37 @@ def import_deps() -> Tuple[Any, Any, Any, Any]:
     return fitz, cv2, np, pd
 
 
+def _preprocess_for_ocr(img_bgr: Any, *, scale: float = 3.0, border: int = 10) -> Tuple[Any, float, int]:
+    """
+    Upscale, enhance contrast, binarize, and pad an image region for Tesseract.
+
+    Steps:
+      1. Upscale by `scale` using bicubic interpolation (Tesseract accuracy improves
+         significantly above ~300 DPI effective resolution).
+      2. Convert to greyscale.
+      3. CLAHE: normalises local contrast so faint ink and coloured cell backgrounds
+         don't confuse the binariser.
+      4. Gaussian blur: removes scanner noise / JPEG artefacts before thresholding.
+      5. Otsu binarisation: produces clean black-on-white regardless of the original
+         background colour (coloured header rows, grey stripes, etc.).
+      6. White border: prevents Tesseract from clipping characters at image edges.
+
+    Returns (processed_img, scale, border) so callers can map token coordinates
+    back to the original image space:
+        orig_x = (tesseract_x - border) / scale
+    """
+    import cv2
+
+    up = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    padded = cv2.copyMakeBorder(binary, border, border, border, border, cv2.BORDER_CONSTANT, value=255)
+    return padded, scale, border
+
+
 def render_page_image(fitz: Any, cv2: Any, np: Any, pdf_path: Path, page_index: int, dpi: int) -> Any:
     doc = fitz.open(str(pdf_path))
     if page_index >= len(doc):
@@ -356,8 +387,10 @@ def tokens_from_tesseract(table_img: Any, *, tesseract_cmd: str, tessdata: Optio
     if tessdata:
         os.environ["TESSDATA_PREFIX"] = tessdata
 
-    cfg = "--oem 1 --psm 6 -c preserve_interword_spaces=1"
-    data = pytesseract.image_to_data(table_img, output_type=pytesseract.Output.DICT, config=cfg)
+    processed, scale, border = _preprocess_for_ocr(table_img, scale=3.0, border=10)
+    inv = 1.0 / scale
+    cfg = "--oem 3 --psm 6 -c preserve_interword_spaces=1"
+    data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT, config=cfg)
     n = len(data.get("text", []))
     toks: List[Token] = []
     for i in range(n):
@@ -373,16 +406,21 @@ def tokens_from_tesseract(table_img: Any, *, tesseract_cmd: str, tessdata: Optio
         x, y, w, h = int(data["left"][i]), int(data["top"][i]), int(data["width"][i]), int(data["height"][i])
         if w <= 0 or h <= 0:
             continue
+        # Map from preprocessed-image coordinates back to original table_img coordinates.
+        x0 = (x - border) * inv
+        y0 = (y - border) * inv
+        x1 = (x + w - border) * inv
+        y1 = (y + h - border) * inv
         toks.append(
             Token(
                 text=txt,
                 conf=float(conf) / 100.0,
-                cx=x + w / 2.0,
-                cy=y + h / 2.0,
-                x0=float(x),
-                y0=float(y),
-                x1=float(x + w),
-                y1=float(y + h),
+                cx=(x0 + x1) / 2.0,
+                cy=(y0 + y1) / 2.0,
+                x0=float(x0),
+                y0=float(y0),
+                x1=float(x1),
+                y1=float(y1),
             )
         )
     return toks
@@ -410,15 +448,13 @@ def _tokens_from_tesseract_image(
     if scale <= 0:
         scale = 1.0
 
-    import cv2
-
-    up = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    cfg = "--oem 1 --psm 6 -c preserve_interword_spaces=1"
-    data = pytesseract.image_to_data(up, output_type=pytesseract.Output.DICT, config=cfg)
+    processed, actual_scale, border = _preprocess_for_ocr(img_bgr, scale=scale, border=10)
+    inv = 1.0 / actual_scale
+    cfg = "--oem 3 --psm 6 -c preserve_interword_spaces=1"
+    data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT, config=cfg)
     n = len(data.get("text", []))
 
     toks: List[Token] = []
-    inv = 1.0 / scale
     for i in range(n):
         txt = clean_cell_text(data["text"][i] or "")
         if not txt:
@@ -433,11 +469,11 @@ def _tokens_from_tesseract_image(
         if w <= 0 or h <= 0:
             continue
 
-        # Map back to parent coordinates.
-        x0 = (x * inv) + offset_x
-        y0 = (y * inv) + offset_y
-        x1 = ((x + w) * inv) + offset_x
-        y1 = ((y + h) * inv) + offset_y
+        # Map back to parent coordinates (undo border padding and scale, then add region offset).
+        x0 = ((x - border) * inv) + offset_x
+        y0 = ((y - border) * inv) + offset_y
+        x1 = ((x + w - border) * inv) + offset_x
+        y1 = ((y + h - border) * inv) + offset_y
         toks.append(
             Token(
                 text=txt,
