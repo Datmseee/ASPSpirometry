@@ -1032,7 +1032,10 @@ def ocr_cell_candidates(
     except Exception:
         pass
 
-    gray0 = cv2.GaussianBlur(gray0, (3, 3), 0)
+    try:
+        gray0 = cv2.GaussianBlur(gray0, (3, 3), 0)
+    except Exception:
+        pass
     # Mild unsharp mask to separate 1 vs 7 and keep '-' visible.
     try:
         blur = cv2.GaussianBlur(gray0, (0, 0), 1.0)
